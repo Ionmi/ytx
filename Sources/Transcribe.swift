@@ -10,7 +10,7 @@ struct Ytx: AsyncParsableCommand {
     )
 
     @Argument(help: "YouTube or any yt-dlp supported URL.")
-    var url: String
+    var url: String?
 
     @Option(name: .shortAndLong, help: "Speech recognition locale (default: en-US).")
     var locale: String = "en-US"
@@ -24,7 +24,20 @@ struct Ytx: AsyncParsableCommand {
     @Flag(help: "Keep the downloaded audio file (deleted by default).")
     var keepAudio: Bool = false
 
+    mutating func validate() throws {
+        if url == nil && !Terminal.isStdinTTY {
+            throw ValidationError("Missing expected argument '<url>'")
+        }
+    }
+
     mutating func run() async throws {
+        let resolvedURL: String
+        if let url {
+            resolvedURL = url
+        } else {
+            resolvedURL = try interactiveFlow()
+        }
+
         // Parse output format
         guard let outputFormat = OutputFormat(rawValue: format) else {
             throw ValidationError("Invalid format '\(format)'. Use 'txt' or 'srt'.")
@@ -42,8 +55,8 @@ struct Ytx: AsyncParsableCommand {
         try FileManager.default.createDirectory(at: outputDirURL, withIntermediateDirectories: true)
 
         // Download audio
-        printInfo("Downloading audio from: \(url)")
-        let audioFiles = try await Downloader.download(url: url, outputDir: outputDirURL)
+        printInfo("Downloading audio from: \(resolvedURL)")
+        let audioFiles = try await Downloader.download(url: resolvedURL, outputDir: outputDirURL)
         printInfo("Downloaded \(audioFiles.count) file\(audioFiles.count == 1 ? "" : "s").")
 
         // Transcribe each file
@@ -86,15 +99,81 @@ struct Ytx: AsyncParsableCommand {
             print("------------------------------")
         }
     }
+
+    // MARK: - Interactive Flow
+
+    private mutating func interactiveFlow() throws -> String {
+        // URL
+        print("Enter URL: ", terminator: "")
+        fflush(stdout)
+        guard let input = readLine(), !input.isEmpty else {
+            throw ValidationError("No URL provided.")
+        }
+        let url = input.trimmingCharacters(in: .whitespaces)
+
+        // Format
+        print("")
+        print("Output format:")
+        print("  1) txt")
+        print("  2) srt")
+        print("Choose [1]: ", terminator: "")
+        fflush(stdout)
+        if let choice = readLine(), !choice.isEmpty {
+            switch choice.trimmingCharacters(in: .whitespaces) {
+            case "2", "srt": format = "srt"
+            default: format = "txt"
+            }
+        }
+
+        // Locale
+        let locales = [
+            "en-US", "es-ES", "fr-FR", "de-DE",
+            "pt-BR", "it-IT", "ja-JP", "zh-CN",
+        ]
+        print("")
+        print("Locale:")
+        for (i, loc) in locales.enumerated() {
+            print("  \(i + 1)) \(loc)")
+        }
+        print("Choose or type locale [1]: ", terminator: "")
+        fflush(stdout)
+        if let choice = readLine(), !choice.isEmpty {
+            let trimmed = choice.trimmingCharacters(in: .whitespaces)
+            if let num = Int(trimmed), (1...locales.count).contains(num) {
+                locale = locales[num - 1]
+            } else if !trimmed.isEmpty {
+                locale = trimmed
+            }
+        }
+
+        // Keep audio
+        print("")
+        print("Keep audio file? [y/N]: ", terminator: "")
+        fflush(stdout)
+        if let choice = readLine() {
+            keepAudio = choice.trimmingCharacters(in: .whitespaces).lowercased() == "y"
+        }
+
+        print("")
+        return url
+    }
 }
 
 // MARK: - Print Helpers
 
 func printInfo(_ message: String) {
-    print("\u{001B}[1;34m=>\u{001B}[0m \(message)")
+    if Terminal.isStdoutTTY {
+        print("\u{001B}[1;34m=>\u{001B}[0m \(message)")
+    } else {
+        print("=> \(message)")
+    }
 }
 
 func printError(_ message: String) {
     let stderr = FileHandle.standardError
-    stderr.write(Data("\u{001B}[1;31mError:\u{001B}[0m \(message)\n".utf8))
+    if Terminal.isStderrTTY {
+        stderr.write(Data("\u{001B}[1;31mError:\u{001B}[0m \(message)\n".utf8))
+    } else {
+        stderr.write(Data("Error: \(message)\n".utf8))
+    }
 }

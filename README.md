@@ -29,8 +29,10 @@ brew install ytx
 ## Usage
 
 ```
-ytx <url> [options]
+ytx [<url>] [options]
 ```
+
+Run with no arguments for an interactive guided flow, or pass a URL directly.
 
 ### Options
 
@@ -59,9 +61,25 @@ ytx "https://www.youtube.com/watch?v=VIDEO_ID" --keep-audio
 
 # Transcribe an entire playlist
 ytx "https://www.youtube.com/playlist?list=PLAYLIST_ID"
+
+# Interactive mode — guided prompts for URL, format, locale
+ytx
 ```
 
 The first time you use a locale, ytx will automatically download the required language model.
+
+### Scripting
+
+ANSI escape codes are automatically suppressed when stdout/stderr is not a terminal, so ytx works cleanly in pipelines and scripts:
+
+```bash
+# Pipe output without ANSI codes
+ytx "https://..." -f srt -o ~/transcripts 2>&1 | tee log.txt
+
+# Use from a shell script
+URL="https://www.youtube.com/watch?v=VIDEO_ID"
+ytx "$URL" -f srt -o ~/transcripts
+```
 
 ## Shell completions
 

@@ -55,16 +55,27 @@ enum TranscriptionEngine {
         try await analyzer.start(inputAudioFile: audioFile, finishAfterFile: true)
 
         var transcript: AttributedString = ""
+        var lastMilestone = 0
         for try await result in transcriber.results {
             transcript += result.text
             // Print progress
             let progress = min(max(result.resultsFinalizationTime.seconds / duration, 0), 1)
             let percent = Int(progress * 100)
             let preview = String(result.text.characters).trimmingCharacters(in: .whitespaces)
-            print("\r\u{001B}[K[\(String(format: "%3d%%", percent))] \(preview.prefix(60))", terminator: "")
-            fflush(stdout)
+            if Terminal.isStdoutTTY {
+                print("\r\u{001B}[K[\(String(format: "%3d%%", percent))] \(preview.prefix(60))", terminator: "")
+                fflush(stdout)
+            } else {
+                let milestones = [25, 50, 75, 100]
+                if let next = milestones.first(where: { $0 > lastMilestone }), percent >= next {
+                    lastMilestone = next
+                    print("[\(String(format: "%3d%%", next))] \(preview.prefix(60))")
+                }
+            }
         }
-        print("") // Newline after progress
+        if Terminal.isStdoutTTY {
+            print("") // Newline after carriage-return progress
+        }
 
         return options.outputFormat.text(for: transcript, maxLength: options.maxLength)
     }
