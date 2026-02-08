@@ -61,6 +61,10 @@ The first time you use a locale, ytx will automatically download the required la
 2. Transcribes locally using Apple's Speech.framework (`SpeechTranscriber`)
 3. Outputs plain text (`.txt`) or subtitles (`.srt`) with timestamps
 
+## Disclaimer
+
+Respect content creators' rights. Only download content you have permission to use.
+
 ## License
 
 [MIT](LICENSE)
