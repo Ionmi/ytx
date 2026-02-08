@@ -2,11 +2,11 @@ import Foundation
 import Synchronization
 
 enum Downloader {
-    /// Check if yt-dlp is available in PATH.
-    static func isAvailable() -> Bool {
+    /// Check if a command is available in PATH.
+    static func isCommandAvailable(_ command: String) -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        process.arguments = ["yt-dlp"]
+        process.arguments = [command]
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
@@ -18,6 +18,12 @@ enum Downloader {
             return false
         }
     }
+
+    /// Check if yt-dlp is available in PATH.
+    static func isAvailable() -> Bool { isCommandAvailable("yt-dlp") }
+
+    /// Check if ffmpeg is available in PATH.
+    static func isFfmpegAvailable() -> Bool { isCommandAvailable("ffmpeg") }
 
     /// Fetch the video's language metadata via yt-dlp (metadata-only, no download).
     /// Returns a 2-letter language code (e.g. "en", "es") or nil if unavailable.
@@ -65,7 +71,8 @@ enum Downloader {
         url: String,
         outputDir: URL,
         video: Bool = false,
-        onProgress: @Sendable @escaping (String) -> Void = { _ in }
+        onProgress: @Sendable @escaping (String) -> Void = { _ in },
+        verboseLog: @Sendable @escaping (String) -> Void = { _ in }
     ) async throws -> [DownloadResult] {
         let format = video
             ? "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
@@ -95,6 +102,7 @@ enum Downloader {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
+        verboseLog("Running: \(args.joined(separator: " "))")
         try process.run()
 
         // Accumulate stdout (contains both --print paths and --progress lines)
@@ -111,13 +119,16 @@ enum Downloader {
             }
         }
 
-        // Drain stderr to prevent pipe blocking
+        // Accumulate stderr for error reporting and drain to prevent pipe blocking
+        let stderrAccum = Mutex(Data())
         let stderrHandle = stderrPipe.fileHandleForReading
         DispatchQueue.global(qos: .utility).async {
             while true {
                 let data = stderrHandle.availableData
                 if data.isEmpty { break }
+                stderrAccum.withLock { $0.append(data) }
                 if let text = String(data: data, encoding: .utf8) {
+                    verboseLog("[yt-dlp stderr] \(text)")
                     onProgress(text)
                 }
             }
@@ -134,7 +145,10 @@ enum Downloader {
                 let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
                 guard process.terminationStatus == 0 else {
-                    continuation.resume(throwing: DownloadError.processFailure(process.terminationStatus))
+                    let stderrData = stderrAccum.withLock { $0 }
+                    let stderrText = String(data: stderrData, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    continuation.resume(throwing: DownloadError.processFailure(process.terminationStatus, stderrText))
                     return
                 }
 
@@ -157,11 +171,13 @@ enum Downloader {
                         let audioURL = fileURL.deletingPathExtension().appendingPathExtension("m4a")
                         let extract = Process()
                         extract.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                        extract.arguments = [
+                        let ffmpegArgs = [
                             "ffmpeg", "-i", fileURL.path,
                             "-vn", "-acodec", "copy",
                             "-y", audioURL.path,
                         ]
+                        extract.arguments = ffmpegArgs
+                        verboseLog("Running: \(ffmpegArgs.joined(separator: " "))")
                         extract.standardOutput = FileHandle.nullDevice
                         extract.standardError = FileHandle.nullDevice
                         do {
@@ -190,21 +206,24 @@ enum Downloader {
 // MARK: - DownloadError
 
 enum DownloadError: Error, LocalizedError {
-    case processFailure(Int32)
+    case processFailure(Int32, String)
     case noOutputPath
     case fileNotFound(String)
     case audioExtractFailed
 
     var errorDescription: String? {
         switch self {
-        case let .processFailure(status):
-            "yt-dlp exited with status \(status)."
+        case let .processFailure(status, stderr):
+            if stderr.isEmpty {
+                return "yt-dlp exited with status \(status)."
+            }
+            return "yt-dlp exited with status \(status):\n\(stderr)"
         case .noOutputPath:
-            "yt-dlp did not return a file path."
+            return "yt-dlp did not return a file path."
         case let .fileNotFound(path):
-            "Downloaded file not found: \(path)"
+            return "Downloaded file not found: \(path)"
         case .audioExtractFailed:
-            "Failed to extract audio from video. Is ffmpeg installed?"
+            return "Failed to extract audio from video. Is ffmpeg installed?"
         }
     }
 }

@@ -1,4 +1,5 @@
 import ArgumentParser
+import Darwin
 import Foundation
 
 @main
@@ -6,36 +7,42 @@ struct Ytx: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "ytx",
         abstract: "Download and transcribe audio from YouTube (or any yt-dlp URL).",
-        version: "0.3.1"
+        version: "0.4.0"
     )
 
     @Argument(help: "YouTube or any yt-dlp supported URL.")
     var url: String?
 
     @Option(name: .shortAndLong, help: "Speech recognition locale (default: auto-detect, fallback en-US).")
-    var locale: String = "en-US"
+    var locale: String?
 
     @Option(name: .shortAndLong, help: "Output format: txt or srt (default: txt).")
     var format: String = "txt"
 
-    @Option(name: .shortAndLong, help: "Directory to save output files (default: ./output).")
+    @Option(name: .shortAndLong, help: "Directory to save output files.")
     var outputDir: String = "./output"
+
+    @Flag(name: .customLong("stdout"), help: "Write transcript to stdout instead of a file. UI goes to stderr.")
+    var toStdout: Bool = false
 
     @Flag(help: "Keep the downloaded audio file (deleted by default).")
     var keepAudio: Bool = false
 
+    @Option(name: .long, help: "Max characters per SRT line (10-200).")
+    var maxLineLength: Int = 40
+
     @Flag(help: "Also download the video file.")
     var video: Bool = false
 
-    // Track whether --locale was explicitly passed
-    private var localeExplicit: Bool {
-        ProcessInfo.processInfo.arguments.contains("--locale")
-            || ProcessInfo.processInfo.arguments.contains("-l")
-    }
+    @Flag(help: "Show verbose output (yt-dlp stderr, debug info).")
+    var verbose: Bool = false
 
     mutating func validate() throws {
         if url == nil && !Terminal.isStdinTTY {
             throw ValidationError("Missing expected argument '<url>'")
+        }
+        guard (10...200).contains(maxLineLength) else {
+            throw ValidationError("--max-line-length must be between 10 and 200.")
         }
     }
 
@@ -50,6 +57,9 @@ struct Ytx: AsyncParsableCommand {
             isInteractive = true
         }
 
+        // Validate URL
+        try validateURL(resolvedURL)
+
         // Parse output format
         guard let outputFormat = OutputFormat(rawValue: format) else {
             throw ValidationError("Invalid format '\(format)'. Use 'txt' or 'srt'.")
@@ -61,99 +71,135 @@ struct Ytx: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
+        // Validate ffmpeg when video download is requested
+        if video {
+            guard Downloader.isFfmpegAvailable() else {
+                printError("ffmpeg not found. Install with: brew install ffmpeg")
+                throw ExitCode.failure
+            }
+        }
+
         // Auto-detect locale in CLI mode (interactive flow already handles it)
-        if !isInteractive, !localeExplicit {
+        if !isInteractive, locale == nil {
             if let detected = detectLocale(url: resolvedURL) {
                 locale = detected
             }
         }
 
-        // Create output directory
-        let outputDirURL = URL(fileURLWithPath: outputDir)
-        try FileManager.default.createDirectory(at: outputDirURL, withIntermediateDirectories: true)
+        // When piping transcript to stdout, redirect all UI output to stderr
+        if toStdout {
+            Terminal.uiFd = STDERR_FILENO
+        }
+
+        // Create output directory (skip when writing to stdout)
+        let outputDirURL: URL
+        if toStdout {
+            outputDirURL = URL(fileURLWithPath: NSTemporaryDirectory())
+        } else {
+            outputDirURL = URL(fileURLWithPath: outputDir)
+            try FileManager.default.createDirectory(at: outputDirURL, withIntermediateDirectories: true)
+        }
 
         // Install signal handler for cleanup even in CLI mode
         Terminal.installSignalHandler()
 
         // Download with spinner
-        print()
+        uiWrite("\n")
         let dlSpinner = Terminal.Spinner("Downloading \(video ? "video + audio" : "audio")…")
         dlSpinner.start()
 
+        let isVerbose = verbose
         let downloads = try await Downloader.download(
             url: resolvedURL,
             outputDir: outputDirURL,
-            video: video
+            video: video,
+            verboseLog: { msg in
+                if isVerbose {
+                    let stderr = FileHandle.standardError
+                    stderr.write(Data("[verbose] \(msg)\n".utf8))
+                }
+            }
         )
 
         dlSpinner.stop("Downloaded \(downloads.count) file\(downloads.count == 1 ? "" : "s")")
 
         // Register downloaded files for cleanup on interrupt
-        for dl in downloads {
-            Terminal.registerCleanup(path: dl.audioFile.path)
-            if let videoFile = dl.videoFile {
-                Terminal.registerCleanup(path: videoFile.path)
+        if !toStdout {
+            for dl in downloads {
+                Terminal.registerCleanup(path: dl.audioFile.path)
+                if let videoFile = dl.videoFile {
+                    Terminal.registerCleanup(path: videoFile.path)
+                }
             }
         }
 
         // Transcribe each file
-        let resolvedLocale = Locale(identifier: locale)
+        let resolvedLocale = Locale(identifier: locale ?? "en-US")
         let options = TranscriptionEngine.Options(
             locale: resolvedLocale,
             outputFormat: outputFormat,
-            maxLength: 40
+            maxLength: maxLineLength
         )
 
         for (index, dl) in downloads.enumerated() {
-            print()
+            uiWrite("\n")
             if downloads.count > 1 {
                 printStep("[\(index + 1)/\(downloads.count)] Transcribing \(dl.audioFile.lastPathComponent)")
             } else {
                 printStep("Transcribing with locale \(resolvedLocale.identifier)")
             }
-            print()
-
-            // Register output file for cleanup before writing
-            let basename = dl.audioFile.deletingPathExtension().lastPathComponent
-            let ext = outputFormat.rawValue
-            let outputFile = outputDirURL.appendingPathComponent("\(basename).\(ext)")
-            Terminal.registerCleanup(path: outputFile.path)
+            uiWrite("\n")
 
             let result = try await TranscriptionEngine.transcribe(file: dl.audioFile, options: options)
 
-            // Write output
-            try result.write(to: outputFile, atomically: true, encoding: .utf8)
-            Terminal.unregisterCleanup(path: outputFile.path)
+            if toStdout {
+                // Write transcript to stdout
+                print(result)
+            } else {
+                // Register output file for cleanup before writing
+                let basename = dl.audioFile.deletingPathExtension().lastPathComponent
+                let ext = outputFormat.rawValue
+                let outputFile = outputDirURL.appendingPathComponent("\(basename).\(ext)")
+                Terminal.registerCleanup(path: outputFile.path)
 
-            print()
-            printDone("Transcription saved to \(outputFile.path)")
+                // Write output
+                try result.write(to: outputFile, atomically: true, encoding: .utf8)
+                Terminal.unregisterCleanup(path: outputFile.path)
 
-            if let videoFile = dl.videoFile {
-                printDone("Video saved to \(videoFile.path)")
-                Terminal.unregisterCleanup(path: videoFile.path)
+                uiWrite("\n")
+                printDone("Transcription saved to \(outputFile.path)")
+
+                if let videoFile = dl.videoFile {
+                    printDone("Video saved to \(videoFile.path)")
+                    Terminal.unregisterCleanup(path: videoFile.path)
+                }
             }
 
             // Clean up audio file unless --keep-audio
             if !keepAudio {
                 try FileManager.default.removeItem(at: dl.audioFile)
             }
-            Terminal.unregisterCleanup(path: dl.audioFile.path)
+            if !toStdout {
+                Terminal.unregisterCleanup(path: dl.audioFile.path)
+            }
 
-            // Preview
-            print()
-            let dim = Terminal.isStdoutTTY ? "\u{1B}[2m" : ""
-            let reset = Terminal.isStdoutTTY ? "\u{1B}[0m" : ""
-            print("  \(dim)── Preview ──\(reset)")
-            let lines = result.components(separatedBy: .newlines)
-            for line in lines.prefix(15) {
-                print("  \(dim)\(line)\(reset)")
+            // Preview (skip when writing to stdout)
+            if !toStdout {
+                uiWrite("\n")
+                let dim = Terminal.isUITTY ? "\u{1B}[2m" : ""
+                let reset = Terminal.isUITTY ? "\u{1B}[0m" : ""
+                uiWrite("  \(dim)── Preview ──\(reset)\n")
+                let lines = result.components(separatedBy: .newlines)
+                for line in lines.prefix(15) {
+                    uiWrite("  \(dim)\(line)\(reset)\n")
+                }
+                if lines.count > 15 {
+                    uiWrite("  \(dim)… (\(lines.count - 15) more lines)\(reset)\n")
+                }
+                uiWrite("  \(dim)─────────────\(reset)\n")
             }
-            if lines.count > 15 {
-                print("  \(dim)… (\(lines.count - 15) more lines)\(reset)")
-            }
-            print("  \(dim)─────────────\(reset)")
         }
-        print()
+        uiWrite("\n")
     }
 
     // MARK: - Interactive Flow
@@ -168,6 +214,7 @@ struct Ytx: AsyncParsableCommand {
             throw ValidationError("No URL provided.")
         }
         let url = input.trimmingCharacters(in: .whitespaces)
+        try validateURL(url)
         print()
 
         // Format (arrow-key picker)
@@ -232,13 +279,39 @@ struct Ytx: AsyncParsableCommand {
         return url
     }
 
+    // MARK: - URL Validation
+
+    private func validateURL(_ urlString: String) throws {
+        guard let url = URL(string: urlString) else {
+            throw ValidationError("Invalid URL: '\(urlString)'")
+        }
+        guard let scheme = url.scheme, ["http", "https"].contains(scheme.lowercased()) else {
+            throw ValidationError("URL must use http or https scheme: '\(urlString)'")
+        }
+        guard url.host != nil else {
+            throw ValidationError("URL has no host: '\(urlString)'")
+        }
+    }
+
     // MARK: - Locale Detection
 
     private static let languageToLocale: [String: String] = [
+        // Major languages
         "en": "en-US", "es": "es-ES", "fr": "fr-FR", "de": "de-DE",
         "pt": "pt-BR", "it": "it-IT", "ja": "ja-JP", "zh": "zh-CN",
         "ko": "ko-KR", "ru": "ru-RU", "ar": "ar-SA", "hi": "hi-IN",
         "nl": "nl-NL", "sv": "sv-SE", "pl": "pl-PL", "tr": "tr-TR",
+        // European
+        "uk": "uk-UA", "cs": "cs-CZ", "da": "da-DK", "fi": "fi-FI",
+        "el": "el-GR", "hu": "hu-HU", "no": "nb-NO", "nb": "nb-NO",
+        "ro": "ro-RO", "sk": "sk-SK", "ca": "ca-ES", "hr": "hr-HR",
+        "bg": "bg-BG",
+        // Middle East / South Asia
+        "he": "he-IL", "th": "th-TH", "vi": "vi-VN",
+        // Southeast Asia / Malay
+        "id": "id-ID", "ms": "ms-MY",
+        // Chinese variants
+        "zh-Hans": "zh-CN", "zh-Hant": "zh-TW",
     ]
 
     private func detectLocale(url: String) -> String? {
@@ -246,8 +319,13 @@ struct Ytx: AsyncParsableCommand {
         spinner.start()
 
         guard let langCode = Downloader.fetchLanguage(url: url) else {
-            spinner.fail("Language not detected, using \(locale)")
+            spinner.fail("Language not detected, using \(locale ?? "en-US")")
             return nil
+        }
+
+        if verbose {
+            let stderr = FileHandle.standardError
+            stderr.write(Data("[verbose] Raw language code from yt-dlp: \(langCode)\n".utf8))
         }
 
         let resolved = Self.languageToLocale[langCode] ?? langCode
@@ -258,27 +336,32 @@ struct Ytx: AsyncParsableCommand {
 
 // MARK: - Print Helpers
 
+private func uiWrite(_ message: String) {
+    let fd = Terminal.uiFd
+    write(fd, message, message.utf8.count)
+}
+
 func printInfo(_ message: String) {
-    if Terminal.isStdoutTTY {
-        print("\u{001B}[1;34m=>\u{001B}[0m \(message)")
+    if Terminal.isUITTY {
+        uiWrite("\u{001B}[1;34m=>\u{001B}[0m \(message)\n")
     } else {
-        print("=> \(message)")
+        uiWrite("=> \(message)\n")
     }
 }
 
 func printStep(_ message: String) {
-    if Terminal.isStdoutTTY {
-        print("  \u{001B}[1;34m▸\u{001B}[0m \u{001B}[1m\(message)\u{001B}[0m")
+    if Terminal.isUITTY {
+        uiWrite("  \u{001B}[1;34m▸\u{001B}[0m \u{001B}[1m\(message)\u{001B}[0m\n")
     } else {
-        print("=> \(message)")
+        uiWrite("=> \(message)\n")
     }
 }
 
 func printDone(_ message: String) {
-    if Terminal.isStdoutTTY {
-        print("  \u{001B}[1;32m✓\u{001B}[0m \(message)")
+    if Terminal.isUITTY {
+        uiWrite("  \u{001B}[1;32m✓\u{001B}[0m \(message)\n")
     } else {
-        print("=> \(message)")
+        uiWrite("=> \(message)\n")
     }
 }
 

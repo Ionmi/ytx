@@ -7,6 +7,7 @@ Local YouTube transcriber for macOS. Downloads audio with `yt-dlp` and transcrib
 - macOS 26+ (Tahoe)
 - Apple Silicon
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) (`brew install yt-dlp`)
+- [ffmpeg](https://ffmpeg.org/) — only needed for `--video` (`brew install ffmpeg`)
 
 ## Install
 
@@ -41,8 +42,11 @@ Run with no arguments for an interactive guided flow, or pass a URL directly.
 | `-l, --locale` | Speech recognition locale | auto-detect, fallback `en-US` |
 | `-f, --format` | Output format: `txt` or `srt` | `txt` |
 | `-o, --output-dir` | Directory for output files | `./output` |
-| `--video` | Also download the video file (mp4) | off |
+| `--stdout` | Write transcript to stdout (UI goes to stderr) | off |
+| `--video` | Also download the video file (mp4). Requires ffmpeg | off |
 | `--keep-audio` | Keep the downloaded audio file | off (deleted) |
+| `--max-line-length` | Max characters per SRT subtitle line (10-200) | `40` |
+| `--verbose` | Show debug output (yt-dlp stderr, commands, etc.) | off |
 | `--version` | Print version | |
 
 ### Examples
@@ -63,8 +67,14 @@ ytx "https://www.youtube.com/watch?v=VIDEO_ID" --video
 # Keep the downloaded audio file
 ytx "https://www.youtube.com/watch?v=VIDEO_ID" --keep-audio
 
+# SRT with wider subtitle lines
+ytx "https://www.youtube.com/watch?v=VIDEO_ID" -f srt --max-line-length 80
+
 # Transcribe an entire playlist
 ytx "https://www.youtube.com/playlist?list=PLAYLIST_ID"
+
+# Debug a failing download
+ytx "https://www.youtube.com/watch?v=VIDEO_ID" --verbose
 
 # Interactive mode — guided prompts for URL, format, locale
 ytx
@@ -72,12 +82,30 @@ ytx
 
 The locale is auto-detected from the video's metadata when `--locale` is not specified. The first time you use a locale, ytx will automatically download the required language model.
 
+### Piping (`--stdout`)
+
+Use `--stdout` to write the transcript to stdout instead of a file. All UI output (spinners, progress bars, status messages) is redirected to stderr so the transcript stream stays clean:
+
+```bash
+# Save transcript while seeing progress on stderr
+ytx "https://..." --stdout > transcript.txt
+
+# Pipe into another tool
+ytx "https://..." --stdout -f srt | my-subtitle-tool
+
+# Search the transcript
+ytx "https://..." --stdout | grep -i "keyword"
+
+# Word count
+ytx "https://..." --stdout | wc -w
+```
+
 ### Scripting
 
 ANSI escape codes are automatically suppressed when stdout/stderr is not a terminal, so ytx works cleanly in pipelines and scripts:
 
 ```bash
-# Pipe output without ANSI codes
+# Log everything to a file
 ytx "https://..." -f srt -o ~/transcripts 2>&1 | tee log.txt
 
 # Use from a shell script

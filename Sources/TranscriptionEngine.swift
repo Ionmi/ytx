@@ -42,11 +42,12 @@ enum TranscriptionEngine {
         // Auto-download language model if not installed
         let installedLocales = await SpeechTranscriber.installedLocales
         if !installedLocales.contains(where: { $0.identifier(.bcp47) == options.locale.identifier(.bcp47) }) {
-            printInfo("Downloading language model for \(options.locale.identifier)...")
+            let modelSpinner = Terminal.Spinner("Downloading language model for \(options.locale.identifier)…")
+            modelSpinner.start()
             if let request = try await AssetInventory.assetInstallationRequest(supporting: modules) {
                 try await request.downloadAndInstall()
             }
-            printInfo("Language model ready.")
+            modelSpinner.stop("Language model ready")
         }
 
         let analyzer = SpeechAnalyzer(modules: modules)
@@ -62,17 +63,19 @@ enum TranscriptionEngine {
             let progress = min(max(result.resultsFinalizationTime.seconds / duration, 0), 1)
             let percent = Int(progress * 100)
             let preview = String(result.text.characters).trimmingCharacters(in: .whitespaces)
-            if Terminal.isStdoutTTY {
+            if Terminal.isUITTY {
                 Terminal.renderProgress(percent: percent, label: String(preview.prefix(50)))
             } else {
                 let milestones = [25, 50, 75, 100]
                 if let next = milestones.first(where: { $0 > lastMilestone }), percent >= next {
                     lastMilestone = next
-                    print("[\(String(format: "%3d%%", next))] \(preview.prefix(60))")
+                    let line = "[\(String(format: "%3d%%", next))] \(preview.prefix(60))\n"
+                    let fd = Terminal.uiFd
+                    write(fd, line, line.utf8.count)
                 }
             }
         }
-        if Terminal.isStdoutTTY {
+        if Terminal.isUITTY {
             Terminal.finishProgress("Transcription complete")
         }
 

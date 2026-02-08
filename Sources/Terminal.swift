@@ -7,6 +7,13 @@ enum Terminal {
     static let isStdoutTTY = isatty(STDOUT_FILENO) != 0
     static let isStderrTTY = isatty(STDERR_FILENO) != 0
 
+    /// File descriptor used for UI output (spinners, progress, status).
+    /// Defaults to stdout; set to STDERR_FILENO when stdout carries data (e.g. `-o -`).
+    nonisolated(unsafe) static var uiFd: Int32 = STDOUT_FILENO
+
+    /// Whether the UI file descriptor is a TTY.
+    static var isUITTY: Bool { isatty(uiFd) != 0 }
+
     static var width: Int {
         var ws = winsize()
         if ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0, ws.ws_col > 0 {
@@ -17,6 +24,11 @@ enum Terminal {
 
     // MARK: - Raw Mode
 
+    // These are `nonisolated(unsafe)` because they must be accessible from the
+    // POSIX signal handler installed via `signal(SIGINT)`. Signal handlers run
+    // on an arbitrary thread outside Swift's concurrency model, so using actors
+    // or locks is not safe. We accept the race-condition trade-off here since
+    // the signal handler only runs during process teardown.
     nonisolated(unsafe) private static var originalTermios = termios()
     nonisolated(unsafe) private static var rawModeActive = false
     nonisolated(unsafe) private static var cleanupPaths: [String] = []
@@ -78,9 +90,10 @@ enum Terminal {
         }
 
         func start() {
-            guard Terminal.isStdoutTTY else {
+            let fd = Terminal.uiFd
+            guard Terminal.isUITTY else {
                 let line = "  \u{1B}[2m\(message)\u{1B}[0m\n"
-                write(STDOUT_FILENO, line, line.utf8.count)
+                write(fd, line, line.utf8.count)
                 finished.withLock { $0 = true }
                 return
             }
@@ -89,7 +102,7 @@ enum Terminal {
                 while running.withLock({ $0 }) {
                     let frame = frames[i % frames.count]
                     let line = "\r\u{1B}[K  \u{1B}[1;34m\(frame)\u{1B}[0m \u{1B}[2m\(message)\u{1B}[0m"
-                    write(STDOUT_FILENO, line, line.utf8.count)
+                    write(fd, line, line.utf8.count)
                     i += 1
                     Thread.sleep(forTimeInterval: 0.08)
                 }
@@ -107,32 +120,34 @@ enum Terminal {
         func stop(_ result: String? = nil) {
             running.withLock { $0 = false }
             waitForThread()
-            guard Terminal.isStdoutTTY else {
+            let fd = Terminal.uiFd
+            guard Terminal.isUITTY else {
                 if let result {
                     let line = "  \(result)\n"
-                    write(STDOUT_FILENO, line, line.utf8.count)
+                    write(fd, line, line.utf8.count)
                 }
                 return
             }
             if let result {
                 let line = "\r\u{1B}[K  \u{1B}[1;32m✓\u{1B}[0m \(result)\n"
-                write(STDOUT_FILENO, line, line.utf8.count)
+                write(fd, line, line.utf8.count)
             } else {
                 let clear = "\r\u{1B}[K"
-                write(STDOUT_FILENO, clear, clear.utf8.count)
+                write(fd, clear, clear.utf8.count)
             }
         }
 
         func fail(_ result: String) {
             running.withLock { $0 = false }
             waitForThread()
-            guard Terminal.isStdoutTTY else {
+            let fd = Terminal.uiFd
+            guard Terminal.isUITTY else {
                 let line = "  \(result)\n"
-                write(STDOUT_FILENO, line, line.utf8.count)
+                write(fd, line, line.utf8.count)
                 return
             }
             let line = "\r\u{1B}[K  \u{1B}[1;33m⚠\u{1B}[0m \u{1B}[2m\(result)\u{1B}[0m\n"
-            write(STDOUT_FILENO, line, line.utf8.count)
+            write(fd, line, line.utf8.count)
         }
     }
 
@@ -141,7 +156,8 @@ enum Terminal {
     /// Render a progress bar in-place (overwrites current line).
     /// The bar + label is truncated to fit the terminal width so it never wraps.
     static func renderProgress(percent: Int, barWidth: Int = 25, label: String = "") {
-        guard isStdoutTTY else { return }
+        let fd = uiFd
+        guard isUITTY else { return }
         let pct = min(max(percent, 0), 100)
         let filled = Int(Double(pct) / 100.0 * Double(barWidth))
         let empty = barWidth - filled
@@ -163,18 +179,19 @@ enum Terminal {
             }
         }
 
-        write(STDOUT_FILENO, line, line.utf8.count)
+        write(fd, line, line.utf8.count)
     }
 
     /// Finish the progress bar with a final message.
     static func finishProgress(_ message: String) {
-        guard isStdoutTTY else {
+        let fd = uiFd
+        guard isUITTY else {
             let line = "  \(message)\n"
-            write(STDOUT_FILENO, line, line.utf8.count)
+            write(fd, line, line.utf8.count)
             return
         }
         let line = "\r\u{1B}[K  \u{1B}[1;32m✓\u{1B}[0m \(message)\n"
-        write(STDOUT_FILENO, line, line.utf8.count)
+        write(fd, line, line.utf8.count)
     }
 
     // MARK: - Key Reading
@@ -288,7 +305,7 @@ enum Terminal {
     // MARK: - ASCII Art Banner
 
     static func printBanner() {
-        guard isStdoutTTY else { return }
+        guard isUITTY else { return }
         let art = """
                 _
           _   _| |___  __
@@ -300,8 +317,8 @@ enum Terminal {
         let blue = "\u{1B}[1;34m"
         let dim = "\u{1B}[2m"
         let reset = "\u{1B}[0m"
-        print("\(blue)\(art)\(reset)")
-        print("  \(dim)YouTube downloader + transcriber\(reset)")
-        print()
+        let fd = uiFd
+        let line = "\(blue)\(art)\(reset)\n  \(dim)YouTube downloader + transcriber\(reset)\n\n"
+        write(fd, line, line.utf8.count)
     }
 }
