@@ -63,8 +63,7 @@ enum TranscriptionEngine {
             let percent = Int(progress * 100)
             let preview = String(result.text.characters).trimmingCharacters(in: .whitespaces)
             if Terminal.isStdoutTTY {
-                print("\r\u{001B}[K[\(String(format: "%3d%%", percent))] \(preview.prefix(60))", terminator: "")
-                fflush(stdout)
+                Terminal.renderProgress(percent: percent, label: String(preview.prefix(50)))
             } else {
                 let milestones = [25, 50, 75, 100]
                 if let next = milestones.first(where: { $0 > lastMilestone }), percent >= next {
@@ -74,7 +73,7 @@ enum TranscriptionEngine {
             }
         }
         if Terminal.isStdoutTTY {
-            print("") // Newline after carriage-return progress
+            Terminal.finishProgress("Transcription complete")
         }
 
         return options.outputFormat.text(for: transcript, maxLength: options.maxLength)
