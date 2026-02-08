@@ -3,3 +3,5 @@
 output/
 Package.resolved
 .swiftpm/
+CLAUDE.md
+*.tar.gz
