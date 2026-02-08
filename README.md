@@ -11,20 +11,22 @@ Local YouTube transcriber for macOS. Downloads audio with `yt-dlp` and transcrib
 
 ## Install
 
+### Homebrew
+
+```bash
+brew tap ionmi/tap
+brew install ytx
+```
+
 ### From source
+
+Requires Xcode or the Xcode Command Line Tools.
 
 ```bash
 git clone https://github.com/ionmi/ytx.git
 cd ytx
 swift build -c release
 cp .build/release/ytx /usr/local/bin/
-```
-
-### Homebrew
-
-```bash
-brew tap ionmi/tap
-brew install ytx
 ```
 
 ## Usage
