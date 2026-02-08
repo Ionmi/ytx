@@ -6,7 +6,7 @@ struct Ytx: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "ytx",
         abstract: "Download and transcribe audio from YouTube (or any yt-dlp URL).",
-        version: "0.1.1"
+        version: "0.2.0"
     )
 
     @Argument(help: "YouTube or any yt-dlp supported URL.")
