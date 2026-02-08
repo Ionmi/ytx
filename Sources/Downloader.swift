@@ -18,8 +18,8 @@ enum Downloader {
     }
 
     /// Download the best audio from a URL using yt-dlp.
-    /// Returns the file URL of the downloaded audio.
-    static func download(url: String, outputDir: URL) async throws -> URL {
+    /// Returns file URLs of all downloaded audio files (supports playlists).
+    static func download(url: String, outputDir: URL) async throws -> [URL] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = [
@@ -49,20 +49,23 @@ enum Downloader {
                     return
                 }
 
-                // The last non-empty line is the file path
-                let filePath = output.components(separatedBy: .newlines).last(where: { !$0.isEmpty }) ?? ""
-                guard !filePath.isEmpty else {
+                let filePaths = output.components(separatedBy: .newlines).filter { !$0.isEmpty }
+                guard !filePaths.isEmpty else {
                     continuation.resume(throwing: DownloadError.noOutputPath)
                     return
                 }
 
-                let fileURL = URL(fileURLWithPath: filePath)
-                guard FileManager.default.fileExists(atPath: fileURL.path) else {
-                    continuation.resume(throwing: DownloadError.fileNotFound(filePath))
-                    return
+                var fileURLs: [URL] = []
+                for filePath in filePaths {
+                    let fileURL = URL(fileURLWithPath: filePath)
+                    guard FileManager.default.fileExists(atPath: fileURL.path) else {
+                        continuation.resume(throwing: DownloadError.fileNotFound(filePath))
+                        return
+                    }
+                    fileURLs.append(fileURL)
                 }
 
-                continuation.resume(returning: fileURL)
+                continuation.resume(returning: fileURLs)
             }
         }
     }

@@ -19,7 +19,7 @@ swift build -c release
 cp .build/release/ytx /usr/local/bin/
 ```
 
-### Homebrew (coming soon)
+### Homebrew
 
 ```bash
 brew tap ionmi/tap
@@ -39,6 +39,8 @@ ytx <url> [options]
 | `-l, --locale` | Speech recognition locale | `en-US` |
 | `-f, --format` | Output format: `txt` or `srt` | `txt` |
 | `-o, --output-dir` | Directory for output files | `./output` |
+| `--keep-audio` | Keep the downloaded audio file | off (deleted) |
+| `--version` | Print version | |
 
 ### Examples
 
@@ -51,9 +53,28 @@ ytx "https://www.youtube.com/watch?v=VIDEO_ID" -l es-ES -f srt
 
 # Custom output directory
 ytx "https://www.youtube.com/watch?v=VIDEO_ID" -o ~/transcripts
+
+# Keep the downloaded audio file
+ytx "https://www.youtube.com/watch?v=VIDEO_ID" --keep-audio
+
+# Transcribe an entire playlist
+ytx "https://www.youtube.com/playlist?list=PLAYLIST_ID"
 ```
 
 The first time you use a locale, ytx will automatically download the required language model.
+
+## Shell completions
+
+```bash
+# Zsh
+ytx --generate-completion-script zsh > ~/.zfunc/_ytx
+
+# Bash
+ytx --generate-completion-script bash > /etc/bash_completion.d/ytx
+
+# Fish
+ytx --generate-completion-script fish > ~/.config/fish/completions/ytx.fish
+```
 
 ## How it works
 

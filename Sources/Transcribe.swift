@@ -5,7 +5,8 @@ import Foundation
 struct Ytx: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "ytx",
-        abstract: "Download and transcribe audio from YouTube (or any yt-dlp URL)."
+        abstract: "Download and transcribe audio from YouTube (or any yt-dlp URL).",
+        version: "0.1.0"
     )
 
     @Argument(help: "YouTube or any yt-dlp supported URL.")
@@ -19,6 +20,9 @@ struct Ytx: AsyncParsableCommand {
 
     @Option(name: .shortAndLong, help: "Directory to save output files (default: ./output).")
     var outputDir: String = "./output"
+
+    @Flag(help: "Keep the downloaded audio file (deleted by default).")
+    var keepAudio: Bool = false
 
     mutating func run() async throws {
         // Parse output format
@@ -39,36 +43,48 @@ struct Ytx: AsyncParsableCommand {
 
         // Download audio
         printInfo("Downloading audio from: \(url)")
-        let audioFile = try await Downloader.download(url: url, outputDir: outputDirURL)
-        printInfo("Downloaded: \(audioFile.path)")
+        let audioFiles = try await Downloader.download(url: url, outputDir: outputDirURL)
+        printInfo("Downloaded \(audioFiles.count) file\(audioFiles.count == 1 ? "" : "s").")
 
-        // Transcribe
+        // Transcribe each file
         let resolvedLocale = Locale(identifier: locale)
-        printInfo("Transcribing with locale=\(resolvedLocale.identifier) ...")
-
         let options = TranscriptionEngine.Options(
             locale: resolvedLocale,
             outputFormat: outputFormat,
             maxLength: 40
         )
-        let result = try await TranscriptionEngine.transcribe(file: audioFile, options: options)
 
-        // Write output
-        let basename = audioFile.deletingPathExtension().lastPathComponent
-        let ext = outputFormat.rawValue
-        let outputFile = outputDirURL.appendingPathComponent("\(basename).\(ext)")
-        try result.write(to: outputFile, atomically: true, encoding: .utf8)
+        for (index, audioFile) in audioFiles.enumerated() {
+            if audioFiles.count > 1 {
+                printInfo("[\(index + 1)/\(audioFiles.count)] \(audioFile.lastPathComponent)")
+            }
 
-        // Summary
-        printInfo("Transcription saved to: \(outputFile.path)")
-        print("")
-        print("-- Preview (first 20 lines) --")
-        let lines = result.components(separatedBy: .newlines)
-        for line in lines.prefix(20) {
-            print(line)
+            printInfo("Transcribing with locale=\(resolvedLocale.identifier) ...")
+            let result = try await TranscriptionEngine.transcribe(file: audioFile, options: options)
+
+            // Write output
+            let basename = audioFile.deletingPathExtension().lastPathComponent
+            let ext = outputFormat.rawValue
+            let outputFile = outputDirURL.appendingPathComponent("\(basename).\(ext)")
+            try result.write(to: outputFile, atomically: true, encoding: .utf8)
+
+            printInfo("Transcription saved to: \(outputFile.path)")
+
+            // Clean up audio file unless --keep-audio
+            if !keepAudio {
+                try FileManager.default.removeItem(at: audioFile)
+            }
+
+            // Preview
+            print("")
+            print("-- Preview (first 20 lines) --")
+            let lines = result.components(separatedBy: .newlines)
+            for line in lines.prefix(20) {
+                print(line)
+            }
+            print("")
+            print("------------------------------")
         }
-        print("")
-        print("------------------------------")
     }
 }
 
