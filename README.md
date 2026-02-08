@@ -38,9 +38,10 @@ Run with no arguments for an interactive guided flow, or pass a URL directly.
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `-l, --locale` | Speech recognition locale | `en-US` |
+| `-l, --locale` | Speech recognition locale | auto-detect, fallback `en-US` |
 | `-f, --format` | Output format: `txt` or `srt` | `txt` |
 | `-o, --output-dir` | Directory for output files | `./output` |
+| `--video` | Also download the video file (mp4) | off |
 | `--keep-audio` | Keep the downloaded audio file | off (deleted) |
 | `--version` | Print version | |
 
@@ -56,6 +57,9 @@ ytx "https://www.youtube.com/watch?v=VIDEO_ID" -l es-ES -f srt
 # Custom output directory
 ytx "https://www.youtube.com/watch?v=VIDEO_ID" -o ~/transcripts
 
+# Download the video alongside the transcript
+ytx "https://www.youtube.com/watch?v=VIDEO_ID" --video
+
 # Keep the downloaded audio file
 ytx "https://www.youtube.com/watch?v=VIDEO_ID" --keep-audio
 
@@ -66,7 +70,7 @@ ytx "https://www.youtube.com/playlist?list=PLAYLIST_ID"
 ytx
 ```
 
-The first time you use a locale, ytx will automatically download the required language model.
+The locale is auto-detected from the video's metadata when `--locale` is not specified. The first time you use a locale, ytx will automatically download the required language model.
 
 ### Scripting
 
@@ -96,9 +100,10 @@ ytx --generate-completion-script fish > ~/.config/fish/completions/ytx.fish
 
 ## How it works
 
-1. Downloads the best available audio using `yt-dlp`
-2. Transcribes locally using Apple's Speech.framework (`SpeechTranscriber`)
-3. Outputs plain text (`.txt`) or subtitles (`.srt`) with timestamps
+1. Downloads the best available audio (and optionally video) using `yt-dlp`
+2. Auto-detects the video's language for speech recognition
+3. Transcribes locally using Apple's Speech.framework
+4. Outputs plain text (`.txt`) or subtitles (`.srt`) with timestamps
 
 ## Disclaimer
 
