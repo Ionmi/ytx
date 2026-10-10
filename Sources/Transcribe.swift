@@ -83,17 +83,17 @@ struct Ytx: AsyncParsableCommand {
             }
         }
 
+        // When piping transcript to stdout, redirect all UI output to stderr
+        if toStdout {
+            Terminal.uiFd = STDERR_FILENO
+        }
+
         // Fetch metadata once (interactive flow already did): locale, captions, download
         if !isInteractive {
             info = fetchInfo(url: resolvedURL)
             if locale == nil, let detected = Self.locale(for: info) {
                 locale = detected
             }
-        }
-
-        // When piping transcript to stdout, redirect all UI output to stderr
-        if toStdout {
-            Terminal.uiFd = STDERR_FILENO
         }
 
         // Create output directory (skip when writing to stdout)
@@ -109,13 +109,12 @@ struct Ytx: AsyncParsableCommand {
         Terminal.installSignalHandler()
 
         // Captions first: seconds instead of minutes of on-device transcription
-        let lang = locale.map { String($0.prefix { $0 != "-" && $0 != "_" }) }
         if !noCaptions, !video, !keepAudio, let info, !info.isPlaylist,
-           let caption = info.captionURL(lang: lang) {
+           let caption = info.caption() {
             uiWrite("\n")
             let spinner = Terminal.Spinner("Fetching YouTube \(caption.kind)…")
             spinner.start()
-            if let cues = await Downloader.fetchCaptions(from: caption.url) {
+            if let cues = await Downloader.fetchCaptions(from: caption.url, clipOverlaps: caption.isAuto) {
                 spinner.stop("Using YouTube \(caption.kind)")
                 let basename = (info.title ?? "transcript").replacingOccurrences(of: "/", with: "-")
                 try emit(outputFormat.text(for: cues), basename: basename, outputDirURL: outputDirURL)

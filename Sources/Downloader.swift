@@ -36,15 +36,26 @@ enum Downloader {
         let manualCaptions: [String: URL]
         let autoCaptions: [String: URL]
 
-        /// Manual subs in `lang`, else the original-language auto captions.
-        /// Never picks auto-translated tracks.
-        func captionURL(lang: String?) -> (url: URL, kind: String)? {
-            if let lang, let key = manualCaptions.keys.sorted().first(where: { $0 == lang || $0.hasPrefix(lang + "-") }) {
-                return (manualCaptions[key]!, "manual captions (\(key))")
+        /// Manual subs in the video's own language, else the original-language
+        /// auto captions. Never picks translated tracks, whatever `--locale` says.
+        func caption() -> (url: URL, kind: String, isAuto: Bool)? {
+            if let key = language.flatMap(manualKey(for:)) {
+                return (manualCaptions[key]!, "manual captions (\(key))", false)
             }
-            let key = lang.map { "\($0)-orig" } ?? autoCaptions.keys.first { $0.hasSuffix("-orig") }
-            guard let key, let url = autoCaptions[key] else { return nil }
-            return (url, "auto captions (\(key.dropLast(5)))")
+            guard let key = autoCaptions.keys.first(where: { $0.hasSuffix("-orig") }) else { return nil }
+            return (autoCaptions[key]!, "auto captions (\(key.dropLast(5)))", true)
+        }
+
+        /// Exact tag first. "zh-Hant" may fall back to bare "zh", never to "zh-Hans".
+        /// Bare "en" may take a regional "en-GB" (same language).
+        private func manualKey(for lang: String) -> String? {
+            let keys = manualCaptions.keys.sorted()
+            if keys.contains(lang) { return lang }
+            if let dash = lang.firstIndex(of: "-") {
+                let base = String(lang[..<dash])
+                return keys.contains(base) ? base : nil
+            }
+            return keys.first { $0.hasPrefix(lang + "-") }
         }
     }
 
@@ -92,11 +103,11 @@ enum Downloader {
     }
 
     /// Download and parse a YouTube json3 caption track. Returns nil on any failure.
-    static func fetchCaptions(from url: URL) async -> [Caption]? {
+    static func fetchCaptions(from url: URL, clipOverlaps: Bool) async -> [Caption]? {
         guard let (data, response) = try? await URLSession.shared.data(from: url),
               (response as? HTTPURLResponse)?.statusCode == 200
         else { return nil }
-        return Caption.parseJSON3(data)
+        return Caption.parseJSON3(data, clipOverlaps: clipOverlaps)
     }
 
     /// Download result containing audio path and optional video path.
@@ -258,7 +269,7 @@ struct Caption: Sendable {
     let text: String
 
     /// Parse YouTube's json3 caption format into cues.
-    static func parseJSON3(_ data: Data) -> [Caption]? {
+    static func parseJSON3(_ data: Data, clipOverlaps: Bool) -> [Caption]? {
         struct Doc: Decodable { let events: [Event]? }
         struct Event: Decodable { let tStartMs: Double?; let dDurationMs: Double?; let segs: [Seg]? }
         struct Seg: Decodable { let utf8: String? }
@@ -272,7 +283,9 @@ struct Caption: Sendable {
             return Caption(start: start, end: start + (event.dDurationMs ?? 0) / 1000, text: text)
         }
         guard !cues.isEmpty else { return nil }
+        guard clipOverlaps else { return cues }
         // Auto captions roll: each cue stays on screen past the next one's start. Clip.
+        // Manual captions keep their timings: overlaps there are intentional.
         return cues.indices.map { i in
             let next = i + 1 < cues.count ? cues[i + 1].start : .infinity
             let end = next > cues[i].start ? min(cues[i].end, next) : cues[i].end

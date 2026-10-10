@@ -48,10 +48,12 @@ enum OutputFormat: String {
     }
 
     static func timestamp(_ timeInterval: TimeInterval) -> String {
-        let ms = Int(timeInterval.truncatingRemainder(dividingBy: 1) * 1000)
-        let s = Int(timeInterval) % 60
-        let m = (Int(timeInterval) / 60) % 60
-        let h = Int(timeInterval) / 60 / 60
-        return String(format: "%0.2d:%0.2d:%0.2d,%0.3d", h, m, s, ms)
+        // Round once, then integer math: 1.001 s must not render as ",000"
+        let total = Int((max(timeInterval, 0) * 1000).rounded())
+        let ms = total % 1000
+        let s = total / 1000 % 60
+        let m = total / 60_000 % 60
+        let h = total / 3_600_000
+        return String(format: "%02d:%02d:%02d,%03d", h, m, s, ms)
     }
 }
