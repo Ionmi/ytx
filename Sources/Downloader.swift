@@ -25,12 +25,34 @@ enum Downloader {
     /// Check if ffmpeg is available in PATH.
     static func isFfmpegAvailable() -> Bool { isCommandAvailable("ffmpeg") }
 
-    /// Fetch the video's language metadata via yt-dlp (metadata-only, no download).
-    /// Returns a 2-letter language code (e.g. "en", "es") or nil if unavailable.
-    static func fetchLanguage(url: String) -> String? {
+    /// Metadata from a single `yt-dlp -J` call. Reused for locale detection,
+    /// captions, and `--load-info-json` so the download skips a second extraction.
+    struct VideoInfo: Sendable {
+        let json: Data
+        let isPlaylist: Bool
+        let language: String?
+        let title: String?
+        /// json3 caption URLs keyed by YouTube language code (e.g. "en", "en-orig").
+        let manualCaptions: [String: URL]
+        let autoCaptions: [String: URL]
+
+        /// Manual subs in `lang`, else the original-language auto captions.
+        /// Never picks auto-translated tracks.
+        func captionURL(lang: String?) -> (url: URL, kind: String)? {
+            if let lang, let key = manualCaptions.keys.sorted().first(where: { $0 == lang || $0.hasPrefix(lang + "-") }) {
+                return (manualCaptions[key]!, "manual captions (\(key))")
+            }
+            let key = lang.map { "\($0)-orig" } ?? autoCaptions.keys.first { $0.hasSuffix("-orig") }
+            guard let key, let url = autoCaptions[key] else { return nil }
+            return (url, "auto captions (\(key.dropLast(5)))")
+        }
+    }
+
+    /// Fetch video metadata via yt-dlp (no download). Returns nil on any failure.
+    static func fetchInfo(url: String) -> VideoInfo? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["yt-dlp", "--print", "%(language)s", "--no-download", url]
+        process.arguments = ["yt-dlp", "-J", "--flat-playlist", "--no-warnings", url]
 
         let pipe = Pipe()
         process.standardInput = FileHandle.nullDevice
@@ -47,15 +69,34 @@ enum Downloader {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
 
-        guard process.terminationStatus == 0 else { return nil }
-        let output = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard process.terminationStatus == 0,
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
 
-        guard !output.isEmpty, output.lowercased() != "na", output != "none" else {
-            return nil
+        func json3URLs(_ key: String) -> [String: URL] {
+            guard let tracks = dict[key] as? [String: [[String: Any]]] else { return [:] }
+            return tracks.compactMapValues { formats in
+                (formats.first { $0["ext"] as? String == "json3" }?["url"] as? String).flatMap(URL.init(string:))
+            }
         }
 
-        return output
+        let language = (dict["language"] as? String).flatMap { $0.isEmpty || $0.lowercased() == "na" ? nil : $0 }
+        return VideoInfo(
+            json: data,
+            isPlaylist: dict["_type"] as? String == "playlist",
+            language: language,
+            title: dict["title"] as? String,
+            manualCaptions: json3URLs("subtitles"),
+            autoCaptions: json3URLs("automatic_captions")
+        )
+    }
+
+    /// Download and parse a YouTube json3 caption track. Returns nil on any failure.
+    static func fetchCaptions(from url: URL) async -> [Caption]? {
+        guard let (data, response) = try? await URLSession.shared.data(from: url),
+              (response as? HTTPURLResponse)?.statusCode == 200
+        else { return nil }
+        return Caption.parseJSON3(data)
     }
 
     /// Download result containing audio path and optional video path.
@@ -71,6 +112,7 @@ enum Downloader {
         url: String,
         outputDir: URL,
         video: Bool = false,
+        infoJSON: URL? = nil,
         onProgress: @Sendable @escaping (String) -> Void = { _ in },
         verboseLog: @Sendable @escaping (String) -> Void = { _ in }
     ) async throws -> [DownloadResult] {
@@ -90,7 +132,12 @@ enum Downloader {
         if video {
             args += ["--merge-output-format", "mp4"]
         }
-        args.append(url)
+        // Reuse metadata from fetchInfo: skips a second YouTube extraction (~2 s)
+        if let infoJSON {
+            args += ["--load-info-json", infoJSON.path]
+        } else {
+            args.append(url)
+        }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -199,6 +246,37 @@ enum Downloader {
 
                 continuation.resume(returning: results)
             }
+        }
+    }
+}
+
+// MARK: - Caption
+
+struct Caption: Sendable {
+    let start: Double
+    let end: Double
+    let text: String
+
+    /// Parse YouTube's json3 caption format into cues.
+    static func parseJSON3(_ data: Data) -> [Caption]? {
+        struct Doc: Decodable { let events: [Event]? }
+        struct Event: Decodable { let tStartMs: Double?; let dDurationMs: Double?; let segs: [Seg]? }
+        struct Seg: Decodable { let utf8: String? }
+
+        guard let events = (try? JSONDecoder().decode(Doc.self, from: data))?.events else { return nil }
+        let cues: [Caption] = events.compactMap { event in
+            let raw = (event.segs ?? []).compactMap(\.utf8).joined()
+            let text = raw.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            guard !text.isEmpty, let startMs = event.tStartMs else { return nil }
+            let start = startMs / 1000
+            return Caption(start: start, end: start + (event.dDurationMs ?? 0) / 1000, text: text)
+        }
+        guard !cues.isEmpty else { return nil }
+        // Auto captions roll: each cue stays on screen past the next one's start. Clip.
+        return cues.indices.map { i in
+            let next = i + 1 < cues.count ? cues[i + 1].start : .infinity
+            let end = next > cues[i].start ? min(cues[i].end, next) : cues[i].end
+            return Caption(start: cues[i].start, end: end, text: cues[i].text)
         }
     }
 }

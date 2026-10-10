@@ -17,14 +17,7 @@ enum OutputFormat: String {
         case .txt:
             return String(transcript.characters)
         case .srt:
-            func format(_ timeInterval: TimeInterval) -> String {
-                let ms = Int(timeInterval.truncatingRemainder(dividingBy: 1) * 1000)
-                let s = Int(timeInterval) % 60
-                let m = (Int(timeInterval) / 60) % 60
-                let h = Int(timeInterval) / 60 / 60
-                return String(format: "%0.2d:%0.2d:%0.2d,%0.3d", h, m, s, ms)
-            }
-
+            let format = Self.timestamp
             return transcript.sentences(maxLength: maxLength).compactMap { (sentence: AttributedString) -> (CMTimeRange, String)? in
                 guard let timeRange = sentence.audioTimeRange else { return nil }
                 return (timeRange, String(sentence.characters))
@@ -39,5 +32,26 @@ enum OutputFormat: String {
                 """
             }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
         }
+    }
+
+    /// Render caption cues downloaded from YouTube.
+    /// ponytail: SRT keeps YouTube's own cue splits; --max-line-length not applied.
+    func text(for captions: [Caption]) -> String {
+        switch self {
+        case .txt:
+            return captions.map(\.text).joined(separator: " ")
+        case .srt:
+            return captions.enumerated().map { index, cue in
+                "\(index + 1)\n\(Self.timestamp(cue.start)) --> \(Self.timestamp(cue.end))\n\(cue.text)\n"
+            }.joined(separator: "\n")
+        }
+    }
+
+    static func timestamp(_ timeInterval: TimeInterval) -> String {
+        let ms = Int(timeInterval.truncatingRemainder(dividingBy: 1) * 1000)
+        let s = Int(timeInterval) % 60
+        let m = (Int(timeInterval) / 60) % 60
+        let h = Int(timeInterval) / 60 / 60
+        return String(format: "%0.2d:%0.2d:%0.2d,%0.3d", h, m, s, ms)
     }
 }

@@ -48,6 +48,7 @@ Run with no arguments for an interactive guided flow, or pass a URL directly.
 | `--video` | Also download the video file (mp4). Requires ffmpeg | off |
 | `--keep-audio` | Keep the downloaded audio file | off (deleted) |
 | `--max-line-length` | Max characters per SRT subtitle line (10-200) | `40` |
+| `--no-captions` | Ignore YouTube captions; always transcribe the audio | off |
 | `--verbose` | Show debug output (yt-dlp stderr, commands, etc.) | off |
 | `--version` | Print version | |
 
@@ -81,6 +82,8 @@ ytx "https://www.youtube.com/watch?v=VIDEO_ID" --verbose
 # Interactive mode — guided prompts for URL, format, locale
 ytx
 ```
+
+If the video has captions in its language (manual, or YouTube's original-language auto captions), ytx uses them instead of transcribing: a few seconds instead of minutes. Translated captions are never used. `--video`, `--keep-audio` and `--no-captions` always download and transcribe the audio.
 
 The locale is auto-detected from the video's metadata when `--locale` is not specified. The first time you use a locale, ytx will automatically download the required language model.
 

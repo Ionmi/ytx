@@ -34,6 +34,9 @@ struct Ytx: AsyncParsableCommand {
     @Flag(help: "Also download the video file.")
     var video: Bool = false
 
+    @Flag(name: .customLong("no-captions"), help: "Ignore YouTube captions; always transcribe the audio.")
+    var noCaptions: Bool = false
+
     @Flag(help: "Show verbose output (yt-dlp stderr, debug info).")
     var verbose: Bool = false
 
@@ -49,11 +52,12 @@ struct Ytx: AsyncParsableCommand {
     mutating func run() async throws {
         let resolvedURL: String
         let isInteractive: Bool
+        var info: Downloader.VideoInfo?
         if let url {
             resolvedURL = url
             isInteractive = false
         } else {
-            resolvedURL = try interactiveFlow()
+            (resolvedURL, info) = try interactiveFlow()
             isInteractive = true
         }
 
@@ -79,9 +83,10 @@ struct Ytx: AsyncParsableCommand {
             }
         }
 
-        // Auto-detect locale in CLI mode (interactive flow already handles it)
-        if !isInteractive, locale == nil {
-            if let detected = detectLocale(url: resolvedURL) {
+        // Fetch metadata once (interactive flow already did): locale, captions, download
+        if !isInteractive {
+            info = fetchInfo(url: resolvedURL)
+            if locale == nil, let detected = Self.locale(for: info) {
                 locale = detected
             }
         }
@@ -103,6 +108,31 @@ struct Ytx: AsyncParsableCommand {
         // Install signal handler for cleanup even in CLI mode
         Terminal.installSignalHandler()
 
+        // Captions first: seconds instead of minutes of on-device transcription
+        let lang = locale.map { String($0.prefix { $0 != "-" && $0 != "_" }) }
+        if !noCaptions, !video, !keepAudio, let info, !info.isPlaylist,
+           let caption = info.captionURL(lang: lang) {
+            uiWrite("\n")
+            let spinner = Terminal.Spinner("Fetching YouTube \(caption.kind)…")
+            spinner.start()
+            if let cues = await Downloader.fetchCaptions(from: caption.url) {
+                spinner.stop("Using YouTube \(caption.kind)")
+                let basename = (info.title ?? "transcript").replacingOccurrences(of: "/", with: "-")
+                try emit(outputFormat.text(for: cues), basename: basename, outputDirURL: outputDirURL)
+                uiWrite("\n")
+                return
+            }
+            spinner.fail("Captions unavailable, transcribing audio")
+        }
+
+        // Hand metadata to yt-dlp so it skips a second extraction
+        var infoFile: URL?
+        if let info, !info.isPlaylist {
+            let file = FileManager.default.temporaryDirectory.appendingPathComponent("ytx-\(UUID().uuidString).info.json")
+            if (try? info.json.write(to: file)) != nil { infoFile = file }
+        }
+        defer { if let infoFile { try? FileManager.default.removeItem(at: infoFile) } }
+
         // Download with spinner
         uiWrite("\n")
         let dlSpinner = Terminal.Spinner("Downloading \(video ? "video + audio" : "audio")…")
@@ -113,6 +143,7 @@ struct Ytx: AsyncParsableCommand {
             url: resolvedURL,
             outputDir: outputDirURL,
             video: video,
+            infoJSON: infoFile,
             verboseLog: { msg in
                 if isVerbose {
                     let stderr = FileHandle.standardError
@@ -151,28 +182,11 @@ struct Ytx: AsyncParsableCommand {
             uiWrite("\n")
 
             let result = try await TranscriptionEngine.transcribe(file: dl.audioFile, options: options)
+            try emit(result, basename: dl.audioFile.deletingPathExtension().lastPathComponent, outputDirURL: outputDirURL)
 
-            if toStdout {
-                // Write transcript to stdout
-                print(result)
-            } else {
-                // Register output file for cleanup before writing
-                let basename = dl.audioFile.deletingPathExtension().lastPathComponent
-                let ext = outputFormat.rawValue
-                let outputFile = outputDirURL.appendingPathComponent("\(basename).\(ext)")
-                Terminal.registerCleanup(path: outputFile.path)
-
-                // Write output
-                try result.write(to: outputFile, atomically: true, encoding: .utf8)
-                Terminal.unregisterCleanup(path: outputFile.path)
-
-                uiWrite("\n")
-                printDone("Transcription saved to \(outputFile.path)")
-
-                if let videoFile = dl.videoFile {
-                    printDone("Video saved to \(videoFile.path)")
-                    Terminal.unregisterCleanup(path: videoFile.path)
-                }
+            if !toStdout, let videoFile = dl.videoFile {
+                printDone("Video saved to \(videoFile.path)")
+                Terminal.unregisterCleanup(path: videoFile.path)
             }
 
             // Clean up audio file unless --keep-audio
@@ -182,29 +196,43 @@ struct Ytx: AsyncParsableCommand {
             if !toStdout {
                 Terminal.unregisterCleanup(path: dl.audioFile.path)
             }
-
-            // Preview (skip when writing to stdout)
-            if !toStdout {
-                uiWrite("\n")
-                let dim = Terminal.isUITTY ? "\u{1B}[2m" : ""
-                let reset = Terminal.isUITTY ? "\u{1B}[0m" : ""
-                uiWrite("  \(dim)── Preview ──\(reset)\n")
-                let lines = result.components(separatedBy: .newlines)
-                for line in lines.prefix(15) {
-                    uiWrite("  \(dim)\(line)\(reset)\n")
-                }
-                if lines.count > 15 {
-                    uiWrite("  \(dim)… (\(lines.count - 15) more lines)\(reset)\n")
-                }
-                uiWrite("  \(dim)─────────────\(reset)\n")
-            }
         }
         uiWrite("\n")
     }
 
+    /// Write transcript to stdout or `<outputDir>/<basename>.<format>`, then preview it.
+    private func emit(_ result: String, basename: String, outputDirURL: URL) throws {
+        if toStdout {
+            print(result)
+            return
+        }
+
+        // Register output file for cleanup before writing
+        let outputFile = outputDirURL.appendingPathComponent("\(basename).\(format)")
+        Terminal.registerCleanup(path: outputFile.path)
+        try result.write(to: outputFile, atomically: true, encoding: .utf8)
+        Terminal.unregisterCleanup(path: outputFile.path)
+
+        uiWrite("\n")
+        printDone("Transcription saved to \(outputFile.path)")
+
+        uiWrite("\n")
+        let dim = Terminal.isUITTY ? "\u{1B}[2m" : ""
+        let reset = Terminal.isUITTY ? "\u{1B}[0m" : ""
+        uiWrite("  \(dim)── Preview ──\(reset)\n")
+        let lines = result.components(separatedBy: .newlines)
+        for line in lines.prefix(15) {
+            uiWrite("  \(dim)\(line)\(reset)\n")
+        }
+        if lines.count > 15 {
+            uiWrite("  \(dim)… (\(lines.count - 15) more lines)\(reset)\n")
+        }
+        uiWrite("  \(dim)─────────────\(reset)\n")
+    }
+
     // MARK: - Interactive Flow
 
-    private mutating func interactiveFlow() throws -> String {
+    private mutating func interactiveFlow() throws -> (String, Downloader.VideoInfo?) {
         Terminal.printBanner()
 
         // URL (free-text)
@@ -251,7 +279,8 @@ struct Ytx: AsyncParsableCommand {
         print()
 
         // Auto-detect locale from video, then let user confirm/override
-        let detectedLocale = detectLocale(url: url)
+        let info = fetchInfo(url: url)
+        let detectedLocale = Self.locale(for: info)
         let defaultLocale = detectedLocale ?? "en-US"
 
         let localeItems = [
@@ -276,7 +305,7 @@ struct Ytx: AsyncParsableCommand {
         }
         print()
 
-        return url
+        return (url, info)
     }
 
     // MARK: - URL Validation
@@ -314,13 +343,18 @@ struct Ytx: AsyncParsableCommand {
         "zh-Hans": "zh-CN", "zh-Hant": "zh-TW",
     ]
 
-    private func detectLocale(url: String) -> String? {
-        let spinner = Terminal.Spinner("Detecting video language...")
+    private static func locale(for info: Downloader.VideoInfo?) -> String? {
+        info?.language.map { languageToLocale[$0] ?? $0 }
+    }
+
+    private func fetchInfo(url: String) -> Downloader.VideoInfo? {
+        let spinner = Terminal.Spinner("Fetching video info...")
         spinner.start()
 
-        guard let langCode = Downloader.fetchLanguage(url: url) else {
+        let info = Downloader.fetchInfo(url: url)
+        guard let langCode = info?.language else {
             spinner.fail("Language not detected, using \(locale ?? "en-US")")
-            return nil
+            return info
         }
 
         if verbose {
@@ -328,9 +362,8 @@ struct Ytx: AsyncParsableCommand {
             stderr.write(Data("[verbose] Raw language code from yt-dlp: \(langCode)\n".utf8))
         }
 
-        let resolved = Self.languageToLocale[langCode] ?? langCode
-        spinner.stop("Detected language: \(langCode) → \(resolved)")
-        return resolved
+        spinner.stop("Detected language: \(langCode) → \(Self.languageToLocale[langCode] ?? langCode)")
+        return info
     }
 }
 
